@@ -1,0 +1,19 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# DIFY 后端
+.denv
+.env
+
+# Vite 前端
+dist/
+.vite/
+
+# IDE
+.vscode/
+.DS_Store
+
+# 本地测试
+local_test

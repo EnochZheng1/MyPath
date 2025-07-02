@@ -21,12 +21,29 @@ mongoose.connect(process.env.MONGO_URI)
 
 // Mongoose Schema and Model for the Profile
 const ProfileSchema = new mongoose.Schema({
-  userId: { type: String, required: true, unique: true }, // This is the user's email
+  userId: { type: String, required: true, unique: true },
   name: { type: String, required: true },
-  password: { type: String, required: true }, // Add the password field
+  password: { type: String, required: true },
   lastUpdated: { type: Date, default: Date.now },
   questionnaire: { type: Array, default: [] },
   discovered: { type: Object, default: { interests: [], strengths: [], goals: [] } },
+  // Add the new tracker object with default values
+  tracker: {
+    sat: {
+      current: { type: Number, default: null },
+      goal: { type: Number, default: null },
+      targetDate: { type: String, default: '' }
+    },
+    gpa: {
+      current: { type: Number, default: null },
+      goal: { type: Number, default: null }
+    },
+    competitions: [{
+        id: { type: String },
+        name: { type: String },
+        result: { type: String }
+    }],
+  },
 }, { timestamps: true });
 
 const Profile = mongoose.model('Profile', ProfileSchema);
@@ -298,15 +315,106 @@ app.get('/api/questions/financial', (req, res) => {
   res.json(ALL_QUESTIONS.financial || []);
 });
 
-app.post('/api/answers', (req, res) => {
-  const answers = req.body;
-  console.log('Received answers:', answers);
+// NEW Route: Analyze profile and generate a list of strengths
+app.get('/api/profile/:userId/strengths', async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.params.userId });
 
-  // Here, you would typically save the answers to a database,
-  // associating them with a specific user.
-  // For now, we'll just confirm receipt.
+    if (!profile) {
+      return res.status(404).json({ message: "Profile not found." });
+    }
 
-  res.status(200).json({ message: 'Answers saved successfully!' });
+    const strengths = [];
+    const { academics, interests } = profile.questionnaire.reduce((acc, item) => {
+        acc[item.category] = acc[item.category] || {};
+        acc[item.category][item.id] = item.answer;
+        return acc;
+    }, {});
+
+
+    // --- Simple Mock Logic for identifying strengths ---
+    if (academics?.a1 === '3.8 - 4.0') {
+      strengths.push({ id: 's1', text: 'High GPA', details: 'Your GPA is in the top tier, which is highly attractive to selective colleges.' });
+    }
+    if (academics?.a2 === 'Yes, many') {
+      strengths.push({ id: 's2', text: 'Rigorous Course Load', details: 'Taking many AP, IB, or Honors courses shows you are prepared for college-level work.' });
+    }
+    if (interests?.i1 === 'Volunteering') {
+      strengths.push({ id: 's3', text: 'Community Service', details: 'Your commitment to volunteering demonstrates strong character and community involvement.' });
+    }
+    if (interests?.i1 === 'Sports') {
+        strengths.push({ id: 's4', text: 'Athletic Achievements', details: 'Participation in sports showcases teamwork, discipline, and dedication.' });
+    }
+    // Add more logic here as needed...
+
+    res.json(strengths);
+
+  } catch (error) {
+    res.status(500).json({ message: 'Error generating strengths list', error });
+  }
+});
+
+// NEW Route: Triggers an AI analysis of the user's profile
+app.post('/api/profile/:userId/analyze/strengths', async (req, res) => {
+  try {
+    // 1. Fetch the user's full profile
+    const profile = await Profile.findOne({ userId: req.params.userId });
+    if (!profile) {
+      return res.status(404).json({ message: "Profile not found." });
+    }
+
+    // 2. Format the profile data into a high-quality prompt
+    let prompt = "Analyze the following student profile and identify their key strengths for college applications. List only the strengths.\n\n";
+    prompt += `Student Name: ${profile.name}\n`;
+    prompt += "--- Questionnaire Answers ---\n";
+    profile.questionnaire.forEach(item => {
+      prompt += `- ${item.question}: ${item.answer}\n`;
+    });
+    prompt += "\n--- Other Discovered Information ---\n";
+    if (profile.discovered.interests.length > 0) {
+      prompt += `- Interests: ${profile.discovered.interests.join(', ')}\n`;
+    }
+
+    console.log("---- Generated Prompt for AI ----\n", prompt);
+
+    // 3. Call your Dify workflow (or any LLM API)
+    //    Replace 'YOUR_DIFY_WORKFLOW_URL' and 'YOUR_DIFY_API_KEY' with your actual credentials.
+    /*
+    const difyResponse = await fetch('YOUR_DIFY_WORKFLOW_URL', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer YOUR_DIFY_API_KEY`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            inputs: { "prompt": prompt },
+            response_mode: 'blocking',
+            user: profile.userId
+        })
+    });
+    const aiData = await difyResponse.json();
+    const generatedStrengths = aiData.strengths; // Assuming Dify returns an object like { strengths: [...] }
+    */
+
+    // --- MOCK AI RESPONSE (for testing without a live Dify call) ---
+    const generatedStrengths = [
+        { id: 'ai_s1', text: 'Strong Academic Performer', details: 'A high GPA and rigorous coursework indicate strong academic capabilities.'},
+        { id: 'ai_s2', text: 'Community-Oriented', details: 'Involvement in volunteering shows a commitment to community impact.'},
+        { id: 'ai_s3', text: 'Creative Thinker', details: 'An interest in the Arts suggests creativity and a unique perspective.'},
+    ];
+    // --- END OF MOCK ---
+
+    // 4. Update the profile in the database with the new AI-generated strengths
+    profile.discovered.strengths = generatedStrengths.map(s => s.text); // Save just the text for future analysis
+    await profile.save();
+
+    // 5. Send the detailed strengths list back to the frontend
+    res.json(generatedStrengths);
+
+  } catch (error) {
+    console.error("AI Analysis Error:", error);
+    res.status(500).json({ message: 'Error during AI analysis', error });
+  }
 });
 
 // Start the server and listen for incoming requests

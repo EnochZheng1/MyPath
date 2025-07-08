@@ -52,10 +52,45 @@ const ProfileSchema = new mongoose.Schema({
       likely: { type: Array, default: [] },
       lastGenerated: { type: Date }
   },
-  profileSummary: { type: String, default: '' }
+  profileSummary: { type: String, default: '' },
+  applicationStrategies:{
+    earlyDecision: { type:Array, default:[] },
+    earlyAction: { type:Array, default:[] },
+    strengthsToHighlight: { type: Object, default: {} }
+  }
 }, { timestamps: true });
 
 const Profile = mongoose.model('Profile', ProfileSchema);
+
+
+/**
+ * Calls Dify to get the "Why" reasons for a single school.
+ * @param {string} profileSummary - The user's profile summary string.
+ * @param {string} schoolName - The name of the school.
+ * @param {string} userId - The user's ID for Dify history.
+ * @returns {Promise<Array>} - An array of reason objects.
+ */
+const generateWhyReasons = async (profileSummary, schoolName, userId) => {
+  console.log(`[INFO] Generating new 'Why' reasons via Dify for ${schoolName}`);
+  const difyBody = {
+      inputs: {
+          "profile": profileSummary,
+          "school": schoolName
+      },
+      response_mode: 'blocking',
+      user: userId
+  };
+
+  const aiData = await callDifyWorkflow(
+      process.env.DIFY_WORKFLOW_URL,
+      process.env.COLLEGE_WHY_KEY,
+      difyBody
+  );
+  console.log(aiData.data.outputs.reasoning);
+  return JSON.parse(aiData.data.outputs.reasoning).reasons || []; // Return the reasons array or an empty one
+};
+
+
 
 // --- API Routes ---
 
@@ -519,53 +554,158 @@ app.post('/api/colleges/generate', async (req, res) => {
 
 app.post('/api/colleges/why', async (req, res) => {
   const { userId, schoolName } = req.body;
+  console.log(`--- Received request for 'Why' for user: ${userId}, school: ${schoolName} ---`);
+
   if (!userId || !schoolName) {
     return res.status(400).json({ message: 'User ID and school name are required.' });
   }
 
   try {
+    // 1. Fetch the user's profile
     const profile = await Profile.findOne({ userId: userId });
     if (!profile) {
       return res.status(404).json({ message: "Profile not found." });
     }
 
-    // --- NEW: Check if reasons already exist ---
+    // 2. Check if reasons already exist and return them if they do
     let collegeToUpdate;
+    let categoryPath;
     for (const category of ['reach', 'target', 'likely']) {
-        collegeToUpdate = profile.collegeList[category]?.find(c => c.school === schoolName);
-        if (collegeToUpdate) break;
+        if (profile.collegeList && profile.collegeList[category]) {
+            collegeToUpdate = profile.collegeList[category].find(c => c.school === schoolName);
+            if (collegeToUpdate) {
+                categoryPath = `collegeList.${category}`; // Keep track of where we found it
+                break;
+            }
+        }
     }
 
     if (collegeToUpdate && collegeToUpdate.reasons && collegeToUpdate.reasons.length > 0) {
         console.log(`[INFO] Returning saved 'Why' reasons for ${schoolName}`);
         return res.json(collegeToUpdate.reasons);
     }
-    // --- END OF NEW LOGIC ---
-
-    console.log(`[INFO] No saved reasons found. Generating new 'Why' reasons for ${schoolName}`);
-    const difyBody = { /* ... as before ... */ };
-
-    const aiData = await callDifyWorkflow(
-        process.env.DIFY_WORKFLOW_URL,
-        process.env.COLLEGE_WHY_KEY,
-        difyBody
-    );
     
-    const reasons = aiData.response;
+    // 3. If no reasons exist, generate them using the helper function
+    const reasons = await generateWhyReasons(profile.profileSummary, schoolName, userId);
 
-    // --- NEW: Save the new reasons to the database ---
-    if (collegeToUpdate) {
-        collegeToUpdate.reasons = reasons;
-        profile.markModified('collegeList');
-        await profile.save();
-        console.log(`[SUCCESS] Saved new 'Why' reasons for ${schoolName}`);
+    // 4. Atomically save the newly generated reasons to the correct school in the database
+    if (categoryPath) {
+        await Profile.updateOne(
+            { userId: userId, [`${categoryPath}.school`]: schoolName },
+            { $set: { [`${categoryPath}.$.reasons`]: reasons } }
+        );
+        console.log(`[SUCCESS] Atomically saved new 'Why' reasons for ${schoolName}`);
     }
 
+    // 5. Return the newly generated reasons to the frontend
     res.json(reasons);
 
   } catch (error) {
     console.error("Error in 'Why' endpoint:", error.message);
     res.status(500).json({ message: 'Error generating reasons for recommendation.' });
+  }
+});
+
+app.post('/api/colleges/update-all-reasons', async (req, res) => {
+    const { userId } = req.body;
+    console.log(`--- Received request to update all 'Why' reasons for user: ${userId} ---`);
+
+    if (!userId) {
+        return res.status(400).json({ message: 'User ID is required.' });
+    }
+
+    try {
+        const profile = await Profile.findOne({ userId: userId });
+        if (!profile || !profile.profileSummary) {
+            return res.status(404).json({ message: 'Profile with summary not found.' });
+        }
+
+        const allColleges = [
+            ...profile.collegeList.reach,
+            ...profile.collegeList.target,
+            ...profile.collegeList.likely,
+        ];
+
+        let updatesMade = false;
+        for (const college of allColleges) {
+            // Only generate reasons if they don't already exist
+            if (!college.reasons || college.reasons.length === 0) {
+                const newReasons = await generateWhyReasons(profile.profileSummary, college.school, userId);
+                college.reasons = newReasons;
+                updatesMade = true;
+            }
+        }
+
+        if (updatesMade) {
+            profile.markModified('collegeList');
+            await profile.save();
+            console.log(`[SUCCESS] Bulk update of 'Why' reasons completed for user: ${userId}`);
+        } else {
+            console.log('[INFO] No new reasons needed. All colleges are up-to-date.');
+        }
+
+        res.json({ message: 'Update process completed.', profile });
+
+    } catch (error) {
+        console.error("Error in bulk update 'Why' endpoint:", error.message);
+        res.status(500).json({ message: 'Error during bulk update of reasons.' });
+    }
+});
+
+app.post('/api/strategies/generate', async (req, res) => {
+  const { userId } = req.body;
+  console.log(`--- Received request to POST /api/strategies/generate for userId: ${userId} ---`);
+  if (!userId) {
+    console.log('[FAIL] User ID was not provided.');
+    return res.status(400).json({ message: 'User ID is required.' });
+  }
+
+  try {
+    console.log(`[INFO] Fetching profile for userId: ${userId}`);
+    const profile = await Profile.findOne({ userId });
+    if (!profile || !profile.collegeList) {
+      console.log(`[FAIL] Profile or College List not found for userId: ${userId}`);
+      return res.status(404).json({ message: "Profile and College List not found." });
+    }
+    console.log('[SUCCESS] Profile and College List fetched.');
+
+    let collegeListString = "Reach Schools:\n";
+    profile.collegeList.reach.forEach(c => { collegeListString += `- ${c.school}\n`});
+    collegeListString += "\nTarget Schools:\n";
+    profile.collegeList.target.forEach(c => { collegeListString += `- ${c.school}\n`});
+    collegeListString += "\nLikely Schools:\n";
+    profile.collegeList.likely.forEach(c => { collegeListString += `- ${c.school}\n`});
+
+    console.log("---- Sending to Dify ----");
+    console.log("PROFILE SUMMARY:\n", profile.profileSummary);
+    console.log("COLLEGE LIST STRING:\n", collegeListString);
+    console.log("-------------------------");
+
+    const difyBody = {
+        inputs: {
+            "profile": profile.profileSummary,
+            "college_list": collegeListString
+        },
+        response_mode: 'blocking',
+        user: userId
+    };
+
+    const aiData = await callDifyWorkflow(
+      process.env.DIFY_WORKFLOW_URL,
+      process.env.STRATEGIES_KEY,
+      difyBody
+    )
+    console.log("[SUCCESS] Received response from Dify.");
+    const strategies = JSON.parse(aiData.data.outputs.answer);
+
+    profile.applicationStrategies = strategies;
+    await profile.save();
+    console.log(`[SUCCESS] Saved new application strategies for user: ${userId}`);
+
+    res.json(strategies);
+
+  } catch (error) {
+    res.status(500).json({ message: 'Error generating application strategies.', error });
   }
 });
 

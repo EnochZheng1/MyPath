@@ -16,6 +16,7 @@
     "dotenv": "^16.6.1",
     "express": "^5.1.0",
     "mongoose": "^8.16.1",
+    "node-fetch": "^2.7.0",
     "openai": "^5.7.0"
   },
   "devDependencies": {

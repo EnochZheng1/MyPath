@@ -4,6 +4,8 @@ const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
+const { callDifyWorkflow } = require('./difyService');
+const { generateProfileSummary, ALL_QUESTIONS } = require('./utils/profileUtils');
 require('dotenv').config();
 
 // Create an instance of the Express app
@@ -44,99 +46,32 @@ const ProfileSchema = new mongoose.Schema({
         result: { type: String }
     }],
   },
+  collegeList: {
+      reach: { type: Array, default: [] },
+      target: { type: Array, default: [] },
+      likely: { type: Array, default: [] },
+      lastGenerated: { type: Date }
+  },
+  profileSummary: { type: String, default: '' }
 }, { timestamps: true });
 
 const Profile = mongoose.model('Profile', ProfileSchema);
-
-const ALL_QUESTIONS = {
-  collegeMatch: [
-    {
-      id: 'q1',
-      question: 'What type of college are you looking for?', // Corrected key
-      options: ['Public', 'Private', 'Community College', 'Online'],
-    },
-    {
-      id: 'q2',
-      question: 'What size of college are you looking for?', // Corrected key
-      options: ['Small (under 5,000 students)', 'Medium (5,000 - 15,000 students)', 'Large (over 15,000 students)'],
-    },
-    {
-      id: 'q3',
-      question: 'What is your preferred location?', // Corrected key
-      options: ['Urban', 'Suburban', 'Rural'],
-    },
-    {
-      id: 'q4',
-      question: 'What is your preferred region?', // Corrected key
-      options: ['Northeast', 'Southeast', 'Midwest', 'West'],
-    },
-  ],
-  academics: [
-    {
-      id: 'a1',
-      question: 'What is your GPA (on a 4.0 scale)?', // Corrected key
-      options: ['Below 3.0', '3.0 - 3.4', '3.5 - 3.7', '3.8 - 4.0'],
-    },
-    {
-      id: 'a2',
-      question: 'Have you taken any AP, IB, or Honors courses?', // Corrected key
-      options: ['Yes, many', 'Yes, a few', 'No'],
-    },
-    {
-      id: 'a3',
-      question: 'What is your intended major or field of study?', // Corrected key
-      options: ['STEM (Science, Tech, Engineering, Math)', 'Humanities', 'Arts', 'Business', 'Undecided'],
-    },
-  ],
-  interests: [
-    {
-      id: 'i1',
-      question: 'Which extracurricular activities are you involved in?', // Corrected key
-      options: ['Sports', 'Music/Arts', 'Volunteering', 'Debate/Model UN', 'STEM Club'],
-    },
-    {
-      id: 'i2',
-      question: 'What do you enjoy doing in your free time?', // Corrected key
-      options: ['Reading/Writing', 'Gaming', 'Coding/Building things', 'Spending time outdoors', 'Socializing'],
-    },
-    {
-      id: 'i3',
-      question: 'What kind of campus environment appeals to you?', // Corrected key
-      options: ['A very social, spirited campus', 'A quiet, studious atmosphere', 'A politically active campus', 'A diverse, multicultural environment'],
-    },
-  ],
-  financial: [
-    {
-      id: 'f1',
-      question: 'Do you intend to apply for financial aid?', // Corrected key
-      options: ['Yes', 'No', 'Unsure'],
-    },
-    {
-      id: 'f2',
-      question: 'What is your estimated annual household income?', // Corrected key
-      options: ['Less than $50,000', '$50,000 - $100,000', '$100,000 - $150,000', 'More than $150,000'],
-    },
-    {
-      id: 'f3',
-      question: 'Are you interested in work-study programs?', // Corrected key
-      options: ['Yes', 'No', 'Maybe'],
-    },
-  ],
-};
 
 // --- API Routes ---
 
 // The NEW user creation route
 app.post('/api/users/create', async (req, res) => {
+  console.log('--- Received request to POST /api/users/create ---');
   const { name, email, password, gradeLevel, school } = req.body; // 1. Get password from request
-
   if (!name || !email || !password) { // 2. Make password required
+    console.log('[FAIL] Missing name, email, or password.');
     return res.status(400).json({ message: 'Name, email, and password are required.' });
   }
 
   try {
     const existingProfile = await Profile.findOne({ userId: email });
     if (existingProfile) {
+      console.log(`[FAIL] User with email ${email} already exists.`);
       return res.status(409).json({ message: 'A user with this email already exists.' });
     }
 
@@ -152,6 +87,7 @@ app.post('/api/users/create', async (req, res) => {
     });
 
     await newProfile.save();
+    console.log(`[SUCCESS] New profile created for userId: ${newProfile.userId}`);
 
     res.status(201).json({
       message: 'User account and profile created successfully!',
@@ -159,14 +95,17 @@ app.post('/api/users/create', async (req, res) => {
     });
 
   } catch (error) {
+    console.error('[ERROR] Server error during profile creation:', error);
     res.status(500).json({ message: 'Server error while creating profile.', error });
   }
 });
 
 app.post('/api/users/signin', async (req, res) => {
+  console.log('--- Received request to POST /api/users/signin ---');
   const { email, password } = req.body;
 
   if (!email || !password) {
+    console.log('[FAIL] Missing email or password.');
     return res.status(400).json({ message: 'Email and password are required.' });
   }
 
@@ -174,22 +113,26 @@ app.post('/api/users/signin', async (req, res) => {
     // Find the user by their email (which is their userId)
     const profile = await Profile.findOne({ userId: email });
     if (!profile) {
+      console.log(`[FAIL] Sign-in failed. User not found: ${email}`);
       return res.status(404).json({ message: 'User not found.' });
     }
 
     // Compare the provided password with the stored hashed password
     const isMatch = await bcrypt.compare(password, profile.password);
     if (!isMatch) {
+      console.log(`[FAIL] Sign-in failed. Invalid credentials for: ${email}`);
       return res.status(400).json({ message: 'Invalid credentials.' });
     }
 
     // If credentials are correct, send back a success message and the userId
+    console.log(`[SUCCESS] User signed in: ${profile.userId}`);
     res.status(200).json({
       message: 'Sign in successful!',
       userId: profile.userId,
     });
 
   } catch (error) {
+    console.error('[ERROR] Server error during sign in:', error);
     res.status(500).json({ message: 'Server error during sign in.', error });
   }
 });
@@ -225,47 +168,66 @@ app.get('/api/profile/:userId', async (req, res) => {
 
 // UPDATE a user's profile
 // In backend/server.js, replace the existing PUT route
+// In backend/server.js, replace your existing PUT '/api/profile/:userId' route with this one
 
 app.put('/api/profile/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const newAnswerData = req.body.questionnaire; // e.g., { academics: { a1: "..." } }
+  const { userId } = req.params;
+  console.log(`--- Received request to PUT /api/profile/${userId} ---`);
+  console.log('Request body:', JSON.stringify(req.body, null, 2));
 
-    // 1. Find the user's current profile
+  try {
     const profile = await Profile.findOne({ userId: userId });
     if (!profile) {
+      console.log(`[FAIL] Profile not found for userId: ${userId}`);
       return res.status(404).json({ message: "Profile not found." });
     }
 
-    const category = Object.keys(newAnswerData)[0]; // "academics"
-    const answers = newAnswerData[category]; // { a1: "..." }
-    const questionsForCategory = ALL_QUESTIONS[category];
+    const updates = req.body;
 
-    // 2. Create the new, descriptive answer objects
-    const formattedAnswers = Object.entries(answers).map(([questionId, answerText]) => {
-      const question = questionsForCategory.find(q => q.id === questionId);
-      return {
-        id: questionId,
-        category: category,
-        question: question ? question.text : 'Unknown Question',
-        answer: answerText,
-      };
-    });
+    // --- Update Logic ---
 
-    // 3. Filter out old answers from the same category to avoid duplicates
-    const otherCategoryAnswers = profile.questionnaire.filter(q => q.category !== category);
+    // 1. Update questionnaire answers if they are in the request body
+    if (updates.questionnaire) {
+      const category = Object.keys(updates.questionnaire)[0];
+      const answers = updates.questionnaire[category];
+      const questionsForCategory = ALL_QUESTIONS[category];
 
-    // 4. Combine old answers with the new ones
-    profile.questionnaire = [...otherCategoryAnswers, ...formattedAnswers];
+      if (questionsForCategory) {
+        const formattedAnswers = Object.entries(answers).map(([questionId, answerText]) => {
+          const question = questionsForCategory.find(q => q.id === questionId);
+          return {
+            id: questionId,
+            category: category,
+            question: question ? question.question : 'Unknown Question',
+            answer: answerText,
+          };
+        });
+
+        const otherCategoryAnswers = profile.questionnaire.filter(q => q.category !== category);
+        profile.questionnaire = [...otherCategoryAnswers, ...formattedAnswers];
+      }
+    }
+    
+    // 2. Update tracker data if it is in the request body
+    if (updates.tracker) {
+        // This will merge the new tracker data (e.g., just the 'sat' part)
+        // with the existing tracker data without overwriting other parts.
+        profile.tracker = { ...profile.tracker, ...updates.tracker };
+    }
+
+    // 3. Re-generate and save the profile summary after all updates
+    profile.profileSummary = await generateProfileSummary(profile);
+    console.log(`Generated profile summary: {${profile.profileSummary}}`)
     profile.lastUpdated = Date.now();
-
-    // 5. Save the updated profile
+    
+    // 4. Save all changes to the database
     await profile.save();
 
+    console.log(`[SUCCESS] Profile updated and summary regenerated for userId: ${userId}`);
     res.json({ message: 'Profile updated successfully!', profile });
-  } catch (error)
- {
-    console.error('Error updating profile:', error);
+
+  } catch (error) {
+    console.error(`[ERROR] Error updating profile for ${userId}:`, error);
     res.status(500).json({ message: 'Error updating profile', error });
   }
 });
@@ -414,6 +376,196 @@ app.post('/api/profile/:userId/analyze/strengths', async (req, res) => {
   } catch (error) {
     console.error("AI Analysis Error:", error);
     res.status(500).json({ message: 'Error during AI analysis', error });
+  }
+});
+
+// Add this new route to your backend/server.js file
+
+app.get('/api/profile/:userId/improvements', async (req, res) => {
+  try {
+    const profile = await Profile.findOne({ userId: req.params.userId });
+
+    if (!profile) {
+      return res.status(404).json({ message: "Profile not found." });
+    }
+
+    const improvements = [];
+    
+    // Create a simple object from the questionnaire array for easier access
+    const answers = profile.questionnaire.reduce((acc, item) => {
+      acc[item.id] = item.answer;
+      return acc;
+    }, {});
+
+
+    // --- Simple Mock Logic for identifying areas for improvement ---
+    
+    // Academic Improvements
+    if (answers['a1'] === 'Below 3.0' || answers['a1'] === '3.0 - 3.4') {
+      improvements.push({ 
+        id: 'i1', 
+        text: 'Boost Your GPA', 
+        details: 'Focus on study habits and seek extra help to raise your GPA, as this is a key factor for admissions.' 
+      });
+    }
+    if (answers['a2'] === 'No') {
+      improvements.push({ 
+        id: 'i2', 
+        text: 'Consider Advanced Courses', 
+        details: 'Taking AP, IB, or Honors courses can strengthen your application. See if any are available at your school.' 
+      });
+    }
+
+    // Interest-based Improvements
+    if (answers['i1'] !== 'Volunteering') {
+        improvements.push({ 
+            id: 'i3', 
+            text: 'Explore Community Service', 
+            details: 'Volunteering can demonstrate character and a commitment to your community. Look for local opportunities.' 
+        });
+    }
+    
+    // Add more logic here as your app evolves...
+
+    res.json(improvements);
+
+  } catch (error) {
+    res.status(500).json({ message: 'Error generating improvements list', error });
+  }
+});
+
+app.post('/api/colleges/generate', async (req, res) => {
+  const { userId } = req.body;
+  console.log(`--- Received request to POST /api/colleges/generate for userId: ${userId} ---`);
+  if (!userId) {
+    console.log('[FAIL] User ID was not provided in the request body.');
+    return res.status(400).json({ message: 'User ID is required.' });
+  }
+
+  try {
+    // 1. Fetch the user's full profile from the database
+    console.log(`[INFO] Fetching profile for userId: ${userId}...`);
+    const profile = await Profile.findOne({ userId: userId });
+    if (!profile) {
+      console.log(`[FAIL] Profile not found for userId: ${userId}.`);
+      return res.status(404).json({ message: "Profile not found." });
+    }
+    console.log('[SUCCESS] Profile fetched successfully.');
+    
+    let profileSummary;
+    
+    // 2. Check if a summary already exists and is not empty.
+    if (profile.profileSummary && profile.profileSummary.trim() !== '') {
+      console.log('[INFO] Using existing profile summary from database.');
+      profileSummary = profile.profileSummary;
+    } else {
+      // 3. If no summary exists, generate one now.
+      console.log('[INFO] No summary found. Generating a new AI profile summary...');
+      profileSummary = await generateProfileSummary(profile);
+      
+      // 4. Save the newly generated summary back to the profile for future use.
+      profile.profileSummary = profileSummary;
+      await profile.save();
+      console.log(`[SUCCESS] New summary generated and saved for user: ${userId}`);
+    }
+    
+    console.log("---- Using Profile Summary for Dify ----\n", profileSummary);
+
+    // 3. Construct the body for the Dify workflow
+    const difyBody = {
+        inputs: {
+            "profile": profileSummary 
+        },
+        response_mode: 'blocking',
+        user: process.env.DIFY_USER
+    };
+
+    // 4. Call the Dify service (remains the same)
+    console.log('[INFO] Sending request to Dify workflow...');
+    console.log("--- DEBUGGING DIFY CREDENTIALS ---");
+    console.log("Workflow URL being used:", process.env.DIFY_WORKFLOW_URL);
+    console.log("API Key being used:", process.env.COLLEGE_LIST_KEY ? "Loaded (hidden for security)" : "NOT LOADED");
+    console.log("------------------------------------");
+    const aiData = await callDifyWorkflow(
+        process.env.DIFY_WORKFLOW_URL,
+        process.env.COLLEGE_LIST_KEY,
+        difyBody
+    );
+    console.log('[SUCCESS] Received response from Dify.');
+
+    // 5. Parse the JSON string from Dify's response and send it back
+    console.log('[INFO] Parsing college list from Dify response...');
+    const collegeListString = aiData.data.outputs.CollegeList;
+    const allColleges = JSON.parse(collegeListString);
+    const allCollegesWithReasons = allColleges.map(c => ({ ...c, reasons: [] }));
+    const categorizedList = {
+      reach: allCollegesWithReasons.filter(c => c.category === 'Reach' || c.category === 'reach'),
+      target: allCollegesWithReasons.filter(c => c.category === 'Target' || c.category === 'target'),
+      likely: allCollegesWithReasons.filter(c => c.category === 'Safety' || c.category === 'likely'),
+    };
+    profile.collegeList = {
+        ...categorizedList,
+        lastGenerated: new Date()
+    };
+    await profile.save();
+    console.log(`[SUCCESS] Sending categorized college list to user: ${userId}`);
+    res.json(categorizedList);
+
+  } catch (error) {
+    console.error("[ERROR] College List Generation Failed:", error.message);
+    res.status(500).json({ message: 'Error generating college list.' });
+  }
+});
+
+app.post('/api/colleges/why', async (req, res) => {
+  const { userId, schoolName } = req.body;
+  if (!userId || !schoolName) {
+    return res.status(400).json({ message: 'User ID and school name are required.' });
+  }
+
+  try {
+    const profile = await Profile.findOne({ userId: userId });
+    if (!profile) {
+      return res.status(404).json({ message: "Profile not found." });
+    }
+
+    // --- NEW: Check if reasons already exist ---
+    let collegeToUpdate;
+    for (const category of ['reach', 'target', 'likely']) {
+        collegeToUpdate = profile.collegeList[category]?.find(c => c.school === schoolName);
+        if (collegeToUpdate) break;
+    }
+
+    if (collegeToUpdate && collegeToUpdate.reasons && collegeToUpdate.reasons.length > 0) {
+        console.log(`[INFO] Returning saved 'Why' reasons for ${schoolName}`);
+        return res.json(collegeToUpdate.reasons);
+    }
+    // --- END OF NEW LOGIC ---
+
+    console.log(`[INFO] No saved reasons found. Generating new 'Why' reasons for ${schoolName}`);
+    const difyBody = { /* ... as before ... */ };
+
+    const aiData = await callDifyWorkflow(
+        process.env.DIFY_WORKFLOW_URL,
+        process.env.COLLEGE_WHY_KEY,
+        difyBody
+    );
+    
+    const reasons = aiData.response;
+
+    // --- NEW: Save the new reasons to the database ---
+    if (collegeToUpdate) {
+        collegeToUpdate.reasons = reasons;
+        profile.markModified('collegeList');
+        await profile.save();
+        console.log(`[SUCCESS] Saved new 'Why' reasons for ${schoolName}`);
+    }
+
+    res.json(reasons);
+
+  } catch (error) {
+    console.error("Error in 'Why' endpoint:", error.message);
+    res.status(500).json({ message: 'Error generating reasons for recommendation.' });
   }
 });
 
